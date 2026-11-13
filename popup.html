@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <title>نقية</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">
+        <span class="brand-dot" aria-hidden="true"></span>
+        <div>
+          <h1 class="brand-title">نقية</h1>
+          <p class="brand-sub">راجع قديمك قبل ما تقرر</p>
+        </div>
+      </div>
+    </header>
+
+    <main class="panel">
+      <div class="field">
+        <label class="label" for="beforeYear">اعرض كل شيء قبل سنة:</label>
+        <select id="beforeYear" class="select"></select>
+      </div>
+
+      <fieldset class="field types">
+        <legend class="label">نوع المحتوى</legend>
+        <label class="check">
+          <input type="checkbox" id="optComments" checked />
+          <span>تعليقاتي</span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="optPosts" checked />
+          <span>منشوراتي</span>
+        </label>
+      </fieldset>
+
+      <div class="actions">
+        <button id="scanBtn" class="btn btn-primary" type="button">افحص حسابي الآن</button>
+        <button id="stopBtn" class="btn btn-ghost" type="button" hidden>إيقاف</button>
+      </div>
+
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <div class="results-head">
+        <span id="counter" class="counter">لقينا 0 عنصر</span>
+      </div>
+
+      <ul id="results" class="results" aria-label="النتائج"></ul>
+
+      <div class="footer-actions">
+        <button id="backupBtn" class="btn btn-primary btn-small" type="button" disabled>
+          تحميل نسخة احتياطية (JSON)
+        </button>
+        <button id="debugBtn" class="btn btn-ghost btn-small" type="button">نسخ HTML للتشخيص</button>
+      </div>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
