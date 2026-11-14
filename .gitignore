@@ -1,0 +1,4 @@
+# Personal Facebook Activity Log samples and exports — never commit these
+*.txt
+nqiya-backup*.json
+docs/samples/

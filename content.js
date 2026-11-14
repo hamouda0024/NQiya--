@@ -13,6 +13,15 @@
    * SELECTORS — the ONLY place that knows about Facebook's DOM.
    * Edit these arrays when Facebook changes its markup. Every entry is a
    * fallback: they are tried in order and the first one that yields items wins.
+   *
+   * Row anatomy of the Arabic Activity Log (desktop):
+   *   row div
+   *     +- header (h3)                        group/heading line
+   *     +- label > input[type=checkbox]       row checkbox; aria-label holds date + time
+   *     +- content
+   *          +- text line (span[dir=auto])    the comment/post text
+   *          +- a[role=link][aria-label^="عرض"]   per-item permalink ("view" link)
+   *          +- div[role=button][aria-haspopup=dialog]   3-dots menu (read-only here)
    * ========================================================================= */
   const SELECTORS = {
     activityPage: {
@@ -28,14 +37,24 @@
         'aktivitätsprotokoll'
       ]
     },
-    // Candidate containers for a single activity item (tried in order).
+    // One row = the wrapper that owns the row checkbox (and, when present, the 3-dots button).
+    // `:has()` keeps the match on the smallest wrapper instead of the whole page.
     itemContainers: [
-      'div[data-pagelet^="ActivityLog"]',
-      'div[role="main"] div[role="article"]',
-      'div[role="main"] [data-nqiya-item]'
+      'div[role="main"] div:has(> div > label > input[type="checkbox"][aria-label])',
+      'div[role="main"] div:has(> div > div > input[type="checkbox"][aria-label])',
+      'div[role="main"] div:has(input[type="checkbox"][aria-label]):has(div[role="button"][aria-haspopup="dialog"])',
+      'div[role="main"] div[data-pagelet^="ActivityLog"]'
+    ],
+    // Row checkbox: its aria-label is the authoritative date source.
+    rowCheckbox: ['input[type="checkbox"][aria-label]'],
+    // Row 3-dots button. Declared for reference only — nothing here clicks it.
+    rowMenuButton: [
+      'div[role="button"][aria-haspopup="dialog"][aria-label^="خيارات إضافية"]',
+      'div[role="button"][aria-haspopup="menu"][aria-label^="خيارات إضافية"]'
     ],
     // Anchors that point at an item permalink (used by the fallback strategy).
     itemLinkAnchors: [
+      'a[role="link"][aria-label^="عرض"][href]',
       'a[href*="comment_id="]',
       'a[href*="/posts/"]',
       'a[href*="permalink"]',
@@ -43,14 +62,27 @@
       'a[href*="/photo"]',
       'a[href*="fbid="]'
     ],
+    // The row's "عرض" (view) link — this is the per-item permalink.
+    viewLink: ['a[role="link"][aria-label^="عرض"]'],
     // Candidate elements that hold the item's text.
-    textCandidates: ['div[dir="auto"]', 'span[dir="auto"]', 'p', '[data-ad-preview="message"]'],
-    // Candidate elements that hold the item's date.
-    dateCandidates: ['abbr', 'time', 'a[role="link"] span', 'span[aria-label]', '[title]'],
+    textCandidates: ['span[dir="auto"]', 'div[dir="auto"]', 'p', '[data-ad-preview="message"]'],
+    // Date sources, in priority order:
+    // 1) row checkbox aria-label (numeric date + time)
+    // 2) row heading h3 (date written with a month name, hence unambiguous)
+    // 3) legacy Facebook date elements
+    dateCandidates: [
+      'input[type="checkbox"][aria-label]',
+      'h3',
+      'abbr',
+      'time',
+      'a[role="link"] span',
+      'span[aria-label]',
+      '[title]'
+    ],
     // Scrollable containers to try when loading more items.
     scrollContainers: ['div[role="main"]', 'div[role="feed"]', 'div[data-pagelet="root"]'],
     // Fallback: how many ancestors to climb from a permalink anchor to find the item.
-    anchorClimbLevels: 8,
+    anchorClimbLevels: 10,
     // Debug: how many raw items to copy for diagnostics.
     firstItemsForDebug: 3
   };
