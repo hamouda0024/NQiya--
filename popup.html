@@ -22,6 +22,18 @@
         <select id="beforeYear" class="select"></select>
       </div>
 
+      <div class="field">
+        <label class="label" for="cutoffDate">أو تاريخ محدد (قبل):</label>
+        <div class="row">
+          <input type="date" id="cutoffDate" class="select" />
+          <button id="clearDate" class="btn btn-ghost btn-small" type="button">مسح</button>
+        </div>
+        <p id="cutoffHint" class="hint"></p>
+      </div>
+
+      <p id="cutoffLine" class="cutoff-line" role="status" aria-live="polite"></p>
+      <p id="recentWarning" class="warning" hidden></p>
+
       <fieldset class="field types">
         <legend class="label">نوع المحتوى</legend>
         <label class="check">
@@ -36,14 +48,17 @@
 
       <div class="actions">
         <button id="scanBtn" class="btn btn-primary" type="button">افحص حسابي الآن</button>
-        <button id="stopBtn" class="btn btn-ghost" type="button" hidden>إيقاف</button>
+        <button id="stopBtn" class="btn btn-danger-ghost" type="button" hidden>إيقاف</button>
       </div>
 
       <p id="status" class="status" role="status" aria-live="polite"></p>
 
       <div class="results-head">
         <span id="counter" class="counter">لقينا 0 عنصر</span>
+        <button id="toggleDist" class="link-btn" type="button">توزيع السنوات</button>
       </div>
+
+      <ul id="distribution" class="distribution" hidden aria-label="توزيع السنوات"></ul>
 
       <ul id="results" class="results" aria-label="النتائج"></ul>
 
@@ -53,6 +68,42 @@
         </button>
         <button id="debugBtn" class="btn btn-ghost btn-small" type="button">نسخ HTML للتشخيص</button>
       </div>
+
+      <section class="card">
+        <h2 class="card-title">أدوات التجربة</h2>
+
+        <label class="switch">
+          <input type="checkbox" id="dryRun" checked />
+          <span>وضع المحاكاة (بدون أي حذف)</span>
+        </label>
+
+        <label class="switch">
+          <input type="checkbox" id="includeMedia" />
+          <span>تضمين عناصر الصور والفيديو</span>
+        </label>
+
+        <div class="row">
+          <label class="label small" for="capInput">أقصى عدد في الجلسة</label>
+          <input type="number" id="capInput" class="input-number" min="1" max="100" step="1" value="25" />
+        </div>
+
+        <div class="actions">
+          <button id="simBtn" class="btn btn-secondary" type="button" disabled>تشغيل المحاكاة</button>
+        </div>
+
+        <div class="actions">
+          <button id="calMenuBtn" class="btn btn-ghost btn-small" type="button">التقاط القائمة (تشخيص)</button>
+          <button id="calDialogBtn" class="btn btn-ghost btn-small" type="button" disabled>
+            التقاط نافذة التأكيد
+          </button>
+        </div>
+
+        <p class="hint">
+          المحاكاة تفتح قائمة العنصر وتقرأ خياراتها فقط، ثم تغلقها بـ Escape — ما تنقر أي خيار حذف.
+        </p>
+
+        <ul id="simLog" class="sim-log" aria-label="سجل المحاكاة"></ul>
+      </section>
     </main>
 
     <script src="popup.js"></script>

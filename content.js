@@ -88,6 +88,127 @@
   };
 
   /* =========================================================================
+   * DELETE_SELECTORS — selectors and UI strings for the dry-run / deletion
+   * pipeline. Nothing in this file clicks a menu option unless its label is in
+   * `deleteOptionTexts`, and nothing clicks a dialog button unless its label is
+   * in `confirmTexts`.
+   * ========================================================================= */
+  const DELETE_SELECTORS = {
+    // Row 3-dots button (label starts with the Arabic for "more options for").
+    rowMenuButton: [
+      'div[role="button"][aria-label^="خيارات إضافية من أجل"]',
+      'div[role="button"][aria-haspopup="dialog"][aria-label^="خيارات إضافية"]',
+      'div[role="button"][aria-haspopup="menu"][aria-label^="خيارات إضافية"]',
+      'div[role="button"][aria-haspopup]'
+    ],
+    // Menu that opens after clicking the 3-dots button (rendered in a portal).
+    menuContainers: [
+      'div[role="menu"]',
+      'div[role="dialog"] div[role="menu"]',
+      'div[role="dialog"]',
+      'div[role="listbox"]'
+    ],
+    // A clickable menu option, whatever element Facebook used for it.
+    menuOptions: ['[role="menuitem"]', '[role="menuitemradio"]', 'a[role="menuitem"]', 'div[role="button"]'],
+    // Facebook's confirmation dialog and its buttons.
+    dialog: ['div[role="dialog"]', 'div[aria-modal="true"]'],
+    dialogButtons: [
+      'div[role="dialog"] [role="button"]',
+      'div[role="dialog"] button',
+      'div[aria-modal="true"] [role="button"]'
+    ],
+    // The ONLY menu option labels that may ever be treated as deletion.
+    deleteOptionTexts: [
+      'نقل إلى سلة المهملات',
+      'نقل الى سلة المهملات',
+      'حذف',
+      'Move to Trash',
+      'Delete',
+      'Supprimer',
+      'Déplacer vers la corbeille'
+    ],
+    // The ONLY dialog button labels that may ever be clicked to confirm.
+    confirmTexts: [
+      'حذف',
+      'نقل إلى سلة المهملات',
+      'تأكيد',
+      'موافق',
+      'نعم',
+      'Delete',
+      'Move to Trash',
+      'Confirm',
+      'OK',
+      'Supprimer',
+      'Déplacer vers la corbeille'
+    ],
+    // Labels that are never deletion, even if they contain a delete-looking word.
+    forbiddenOptionTexts: [
+      'إخفاء',
+      'الإبلاغ',
+      'حظر',
+      'إلغاء',
+      'hide',
+      'report',
+      'block',
+      'cancel',
+      'masquer',
+      'signaler',
+      'bloquer',
+      'annuler'
+    ],
+    // Warning / rate-limit phrases (Arabic, French, English).
+    warningTexts: [
+      'تم تقييد',
+      'حاول مرة أخرى لاحق',
+      'طلبات كثيرة',
+      'استخدمت كل',
+      'temporarily blocked',
+      'temporarily restricted',
+      'slow down',
+      'try again later',
+      'too many requests',
+      'temporairement bloqué',
+      'réessayez plus tard',
+      'trop de demandes'
+    ],
+    // Media activity phrases: these rows can remove real photos/videos.
+    mediaTexts: [
+      'تمت إضافة صورة',
+      'تمت إضافة فيديو',
+      'صورة جديدة',
+      'صور جديدة',
+      'فيديو جديد',
+      'تمت مشاركة',
+      'ألبوم',
+      'added a photo',
+      'added a video',
+      'added photos',
+      'added videos',
+      'shared a photo',
+      'shared a video',
+      'a ajouté une photo',
+      'a ajouté une vidéo',
+      'a partagé une photo',
+      'a partagé une vidéo'
+    ],
+    // Regions Facebook uses to announce problems.
+    liveRegionSelectors: ['div[role="alert"]', 'div[role="status"]'],
+    // UI strings shown in the popup log (Arabic).
+    ui: {
+      rowNotFound: 'ما لقينا الصف في الصفحة — تم التخطي',
+      menuButtonNotFound: 'ما لقينا زر القائمة — تم التخطي',
+      menuNotFound: 'ما فتحت القائمة — تم التخطي',
+      notDeletable: 'غير قابل للحذف — تم التخطي',
+      skippedMedia: 'صور/فيديو — تم التخطي',
+      wouldClick: 'كان بينقر',
+      menuOpened: 'فتحنا القائمة',
+      dryRunDone: 'انتهت المحاكاة بدون أي حذف',
+      stoppedByUser: 'توقف بناءً على طلبك',
+      warningDetected: 'فيسبوك طلب منك التوقف، استراحة 10 دقائق'
+    }
+  };
+
+  /* =========================================================================
    * Scan limits
    * ========================================================================= */
   const MAX_ITEMS = 300;          // hard cap per scan
@@ -101,7 +222,7 @@
   const STORAGE_META = 'nqiya.meta';
   const STORAGE_PROGRESS = 'nqiya.progress';
 
-  const state = { running: false, stopRequested: false };
+  const state = { running: false, simulating: false, stopRequested: false };
 
   /* =========================================================================
    * Small helpers
@@ -494,6 +615,36 @@
     }
   }
 
+  // Stable identifier derived from the item's own link/IDs, or a hash of its
+  // date + text when the link carries no usable ID.
+  function makeItemId(link, dateIso, text) {
+    const parts = [];
+    try {
+      const url = new URL(link, location.href);
+      for (const key of ['story_fbid', 'comment_id', 'fbid']) {
+        const value = url.searchParams.get(key);
+        if (value && /^[\w.-]{3,}$/.test(value)) parts.push(`${key}:${value}`);
+      }
+      const pfbid = url.pathname.match(/pfbid[\w]+/);
+      if (pfbid) parts.push(pfbid[0]);
+    } catch (_) {
+      /* ignore malformed URLs */
+    }
+    if (parts.length) return `fb-${parts.join('_')}`;
+
+    let hash = 5381;
+    const seed = `${dateIso}|${text.slice(0, 80)}`;
+    for (let i = 0; i < seed.length; i += 1) {
+      hash = ((hash << 5) + hash + seed.charCodeAt(i)) >>> 0;
+    }
+    return `h-${hash.toString(36)}`;
+  }
+
+  function isMediaItem(text) {
+    const value = normalizeUiText(text);
+    return DELETE_SELECTORS.mediaTexts.some((phrase) => value.includes(normalizeUiText(phrase)));
+  }
+
   function collectItems(options) {
     const items = [];
     const containers = findItemContainers();
@@ -501,20 +652,21 @@
       try {
         const dateInfo = extractDate(container);
         if (!dateInfo) continue; // date unknown → excluded, never guessed
-        if (dateInfo.year >= options.beforeYear) continue;
+        if (!(dateInfo.iso < options.cutoffIso)) continue; // strictly before the cutoff
 
         const text = extractText(container, dateInfo);
         if (!text) continue;
 
         const { link, type } = extractLink(container);
 
-        const key = `${dateInfo.iso}|${text.slice(0, 60)}`;
         items.push({
-          key,
+          id: makeItemId(link, dateInfo.iso, text),
+          key: `${dateInfo.iso}|${text.slice(0, 60)}`,
           text,
           date: dateInfo.iso,
           link,
-          type
+          type,
+          media: isMediaItem(text)
         });
       } catch (err) {
         log('collectItems item failed', err);
@@ -594,7 +746,10 @@
     if (!options.includeComments && !options.includePosts) return { ok: false, error: 'NO_TYPE_SELECTED' };
 
     const settings = {
-      beforeYear: Number(options.beforeYear) || 2019,
+      cutoffIso: /^\d{4}-\d{2}-\d{2}$/.test(String(options.cutoffIso || ''))
+        ? String(options.cutoffIso)
+        : `${Number(options.beforeYear) || new Date().getFullYear()}-01-01`,
+      cutoffLabel: typeof options.cutoffLabel === 'string' ? options.cutoffLabel.slice(0, 60) : '',
       includeComments: options.includeComments !== false,
       includePosts: options.includePosts !== false
     };
@@ -615,7 +770,14 @@
         for (const item of items) {
           if (!keepItem(item, settings)) continue;
           if (found.has(item.key)) continue;
-          found.set(item.key, { text: item.text, date: item.date, link: item.link });
+          found.set(item.key, {
+            id: item.id,
+            text: item.text,
+            date: item.date,
+            link: item.link,
+            type: item.type,
+            media: item.media
+          });
           added += 1;
           if (found.size >= MAX_ITEMS) break;
         }
@@ -640,7 +802,8 @@
     const results = Array.from(found.values()).sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
     const meta = {
       count: results.length,
-      beforeYear: settings.beforeYear,
+      cutoffIso: settings.cutoffIso,
+      cutoffLabel: settings.cutoffLabel,
       includeComments: settings.includeComments,
       includePosts: settings.includePosts,
       scannedAt: new Date().toISOString(),
@@ -675,15 +838,395 @@
   }
 
   /* =========================================================================
+   * Shared UI helpers (seconds, clicks on MENU BUTTONS ONLY, sanitizing)
+   * ========================================================================= */
+  function normalizeUiText(value) {
+    return cleanText(value)
+      .replace(/[\u200e\u200f\u202a-\u202e]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function escapeHtml(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function isTrustedSender(sender) {
+    try {
+      return !!(sender && sender.id === chrome.runtime.id);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Sleep that rejects immediately when STOP is requested, even mid-delay.
+  function abortableSleep(ms) {
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const tick = () => {
+        if (state.stopRequested) {
+          reject(new Error('ABORTED'));
+          return;
+        }
+        if (Date.now() - started >= ms) {
+          resolve();
+          return;
+        }
+        setTimeout(tick, 150);
+      };
+      tick();
+    });
+  }
+
+  function findMenuButton(row) {
+    try {
+      for (const selector of DELETE_SELECTORS.rowMenuButton) {
+        const node = row.querySelector(selector);
+        if (node) return node;
+      }
+    } catch (err) {
+      log('findMenuButton failed', err);
+    }
+    return null;
+  }
+
+  function visibleMenus() {
+    const menus = [];
+    try {
+      for (const selector of DELETE_SELECTORS.menuContainers) {
+        for (const node of document.querySelectorAll(selector)) {
+          if (node.getClientRects().length === 0) continue;
+          if (!menus.includes(node)) menus.push(node);
+        }
+      }
+    } catch (err) {
+      log('visibleMenus failed', err);
+    }
+    return menus;
+  }
+
+  async function waitForMenus(timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const menus = visibleMenus().filter(
+        (menu) => menu.querySelector('[role="menuitem"], [role="menuitemradio"], [role="button"]') !== null
+      );
+      if (menus.length) return menus;
+      if (state.stopRequested) return [];
+      await sleep(200);
+    }
+    return [];
+  }
+
+  // Returns the allowlisted option inside the open menu, or null.
+  function findMenuOption(menus) {
+    const wanted = DELETE_SELECTORS.deleteOptionTexts.map(normalizeUiText).filter(Boolean);
+    const forbidden = DELETE_SELECTORS.forbiddenOptionTexts.map(normalizeUiText).filter(Boolean);
+    const candidates = [];
+
+    try {
+      for (const menu of menus) {
+        for (const selector of DELETE_SELECTORS.menuOptions) {
+          for (const node of menu.querySelectorAll(selector)) {
+            if (node.getClientRects().length === 0) continue;
+            const label = normalizeUiText(node.innerText || node.textContent);
+            if (!label || label.length > 80) continue;
+            if (candidates.some((c) => c.node === node)) continue;
+            candidates.push({ node, label });
+          }
+        }
+      }
+    } catch (err) {
+      log('findMenuOption failed', err);
+    }
+
+    const isForbidden = (label) => forbidden.some((bad) => label === bad || label.startsWith(bad));
+
+    for (const pass of ['exact', 'prefix', 'contains']) {
+      for (const candidate of candidates) {
+        if (isForbidden(candidate.label)) continue;
+        for (const want of wanted) {
+          if (pass === 'exact' && candidate.label === want) return { node: candidate.node, label: candidate.label };
+          if (pass === 'prefix' && want.length >= 5 && candidate.label.startsWith(want)) {
+            return { node: candidate.node, label: candidate.label };
+          }
+          if (pass === 'contains' && want.length >= 10 && candidate.label.includes(want)) {
+            return { node: candidate.node, label: candidate.label };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // The only DOM click helper in this file: used for the row 3-dots button.
+  // It is never given a delete option or a confirm button as an argument.
+  function activateMenuButton(button) {
+    try {
+      button.scrollIntoView({ block: 'center', inline: 'nearest' });
+      button.click();
+      return true;
+    } catch (err) {
+      log('activateMenuButton failed', err);
+      return false;
+    }
+  }
+
+  function closeMenu() {
+    try {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })
+      );
+      document.body.dispatchEvent(
+        new KeyboardEvent('keyup', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })
+      );
+      if (document.activeElement && typeof document.activeElement.blur === 'function') {
+        document.activeElement.blur();
+      }
+    } catch (err) {
+      log('closeMenu failed', err);
+    }
+  }
+
+  /* =========================================================================
+   * Diagnostics: sanitized HTML (no class/style, no raw URLs, other text masked)
+   * ========================================================================= */
+  function sanitizeCapture(root) {
+    const skipTags = new Set(['script', 'style', 'svg', 'path', 'noscript', 'link', 'meta', 'img', 'i']);
+    const keepTextSelector = '[role="menuitem"], [role="menuitemradio"], [role="button"], button';
+
+    function walk(node, depth) {
+      if (!node || depth > 16) return '';
+      if (node.nodeType === 3) {
+        const value = cleanText(node.nodeValue);
+        if (!value) return '';
+        const parent = node.parentElement;
+        // Keep text only where it is a UI label (menu option / dialog button).
+        if (parent && parent.closest(keepTextSelector)) return escapeHtml(value.slice(0, 120));
+        return 'TEXT';
+      }
+      if (node.nodeType !== 1) return '';
+
+      const tag = node.tagName.toLowerCase();
+      if (skipTags.has(tag)) return '';
+
+      const attrs = [];
+      for (const attr of Array.from(node.attributes || [])) {
+        const name = attr.name.toLowerCase();
+        if (!/^(role|aria-[a-z-]+|dir|tabindex|type|checked|disabled|title|href)$/.test(name)) continue;
+        if (name === 'href') {
+          attrs.push('href="URL"');
+          continue;
+        }
+        attrs.push(`${name}="${escapeHtml(String(attr.value).replace(/\s+/g, ' ').slice(0, 60))}"`);
+      }
+
+      let inner = '';
+      for (const child of Array.from(node.childNodes || [])) inner += walk(child, depth + 1);
+      inner = inner.replace(/(?:TEXT\s*){2,}/g, 'TEXT ').trim();
+      if (!inner) return '';
+      return `<${tag}${attrs.length ? ` ${attrs.join(' ')}` : ''}>${inner}</${tag}>`;
+    }
+
+    try {
+      return walk(root, 0).slice(0, 20000);
+    } catch (err) {
+      log('sanitizeCapture failed', err);
+      return '';
+    }
+  }
+
+  /* =========================================================================
+   * Calibration: open the FIRST row's 3-dots menu, capture it, close it.
+   * Never clicks an option.
+   * ========================================================================= */
+  async function captureMenuDiagnostics() {
+    if (!isActivityLogPage()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
+    if (state.running || state.simulating) return { ok: false, error: 'ALREADY_RUNNING' };
+
+    const rows = findItemContainers();
+    if (!rows.length) return { ok: false, error: 'NO_ROWS' };
+
+    const row = rows[0];
+    const button = findMenuButton(row);
+    if (!button) return { ok: false, error: 'NO_MENU_BUTTON' };
+
+    try {
+      row.scrollIntoView({ block: 'center' });
+      if (!activateMenuButton(button)) return { ok: false, error: 'CLICK_FAILED' };
+
+      const menus = await waitForMenus(4000);
+      if (!menus.length) {
+        closeMenu();
+        return { ok: false, error: 'MENU_NOT_FOUND' };
+      }
+
+      const html = sanitizeCapture(menus[menus.length - 1]);
+      closeMenu();
+      return { ok: true, html };
+    } catch (err) {
+      log('captureMenuDiagnostics failed', err);
+      closeMenu();
+      return { ok: false, error: 'CALIBRATION_FAILED' };
+    }
+  }
+
+  /* =========================================================================
+   * Dry run (commit 1): opens the menu, reports the option it WOULD click,
+   * closes with Escape. It never clicks a delete option or a dialog button.
+   * ========================================================================= */
+  function rowItemId(row) {
+    try {
+      const dateInfo = extractDate(row);
+      if (!dateInfo) return null;
+      const link = extractLink(row).link;
+      const text = extractText(row, dateInfo);
+      return makeItemId(link, dateInfo.iso, text);
+    } catch (err) {
+      log('rowItemId failed', err);
+      return null;
+    }
+  }
+
+  async function findRowById(id, attempts) {
+    const tries = Number(attempts) > 0 ? Number(attempts) : 14;
+    for (let i = 0; i < tries; i += 1) {
+      if (state.stopRequested) return null;
+      const rows = findItemContainers();
+      for (const row of rows) {
+        if (rowItemId(row) === id) return row;
+      }
+      scrollDown();
+      try {
+        await abortableSleep(600 + Math.floor(Math.random() * 600));
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  function sendSimProgress(payload) {
+    sendToRuntime({
+      type: 'NQIYA_SIM_PROGRESS',
+      index: payload.index,
+      total: payload.total,
+      done: payload.done,
+      message: payload.message
+    });
+  }
+
+  async function simulateDeletion(rawOptions) {
+    const options = rawOptions && typeof rawOptions === 'object' ? rawOptions : {};
+    const ids = Array.isArray(options.ids) ? options.ids.filter((id) => typeof id === 'string').slice(0, 100) : [];
+    const includeMedia = options.includeMedia === true;
+
+    if (!isActivityLogPage()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
+    if (!ids.length) return { ok: false, error: 'NO_IDS' };
+    if (state.running || state.simulating) return { ok: false, error: 'ALREADY_RUNNING' };
+
+    state.simulating = true;
+    state.stopRequested = false;
+    const total = ids.length;
+    let processed = 0;
+
+    try {
+      for (const id of ids) {
+        if (state.stopRequested) break;
+        processed += 1;
+
+        const row = await findRowById(id, 10);
+        if (!row) {
+          sendSimProgress({ index: processed, total, done: false, message: DELETE_SELECTORS.ui.rowNotFound });
+          continue;
+        }
+
+        const rowText = extractText(row, extractDate(row));
+        if (!includeMedia && isMediaItem(rowText)) {
+          sendSimProgress({ index: processed, total, done: false, message: DELETE_SELECTORS.ui.skippedMedia });
+          continue;
+        }
+
+        const button = findMenuButton(row);
+        if (!button) {
+          sendSimProgress({ index: processed, total, done: false, message: DELETE_SELECTORS.ui.menuButtonNotFound });
+          continue;
+        }
+
+        if (!activateMenuButton(button)) {
+          sendSimProgress({ index: processed, total, done: false, message: DELETE_SELECTORS.ui.menuButtonNotFound });
+          continue;
+        }
+
+        const menus = await waitForMenus(4000);
+        if (!menus.length) {
+          closeMenu();
+          sendSimProgress({ index: processed, total, done: false, message: DELETE_SELECTORS.ui.menuNotFound });
+          continue;
+        }
+
+        const option = findMenuOption(menus);
+        closeMenu();
+
+        sendSimProgress({
+          index: processed,
+          total,
+          done: false,
+          message: option
+            ? `${DELETE_SELECTORS.ui.wouldClick}: ${option.label}`
+            : DELETE_SELECTORS.ui.notDeletable
+        });
+
+        if (processed < total) {
+          try {
+            await abortableSleep(1200 + Math.floor(Math.random() * 800));
+          } catch (_) {
+            break;
+          }
+        }
+      }
+    } catch (err) {
+      log('simulateDeletion failed', err);
+    } finally {
+      closeMenu();
+      state.simulating = false;
+    }
+
+    const stopped = state.stopRequested;
+    state.stopRequested = false;
+    sendToRuntime({
+      type: 'NQIYA_SIM_DONE',
+      ok: true,
+      processed,
+      total,
+      stopped,
+      message: stopped ? DELETE_SELECTORS.ui.stoppedByUser : DELETE_SELECTORS.ui.dryRunDone
+    });
+    return { ok: true, processed, total, stopped };
+  }
+
+  /* =========================================================================
    * Message handling
    * ========================================================================= */
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     try {
+      // Only this extension may drive the page.
+      if (!isTrustedSender(sender)) return false;
       if (!message || typeof message.type !== 'string') return false;
 
       switch (message.type) {
         case 'NQIYA_PING':
-          sendResponse({ ok: true, isActivityLog: isActivityLogPage(), scanning: state.running });
+          sendResponse({
+            ok: true,
+            isActivityLog: isActivityLogPage(),
+            scanning: state.running,
+            simulating: state.simulating
+          });
           return false;
 
         case 'NQIYA_SCAN': {
@@ -701,6 +1244,27 @@
           state.stopRequested = true;
           sendResponse({ ok: true, stopping: true });
           return false;
+
+        case 'NQIYA_SIMULATE': {
+          if (state.running || state.simulating) {
+            sendResponse({ ok: false, error: 'ALREADY_RUNNING' });
+            return false;
+          }
+          // Runs in the background so a long simulation can outlive the popup.
+          simulateDeletion(message.options || {});
+          sendResponse({ ok: true, started: true });
+          return false;
+        }
+
+        case 'NQIYA_CALIBRATE_MENU': {
+          captureMenuDiagnostics()
+            .then((result) => sendResponse(result))
+            .catch((err) => {
+              log('calibration failed', err);
+              sendResponse({ ok: false, error: 'CALIBRATION_FAILED' });
+            });
+          return true; // async response
+        }
 
         case 'NQIYA_DEBUG_HTML': {
           const result = debugHtml();

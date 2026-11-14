@@ -1,15 +1,36 @@
-/* background.js — NQiya service worker (Phase 1: scan + preview + backup only) */
+/* background.js — NQiya service worker
+ * Seeds defaults, keeps short-lived progress, and accepts messages only from
+ * this extension. No network access, no remote calls.
+ */
 
-const STORAGE_SETTINGS = 'nqiya.settings';
-const STORAGE_PROGRESS = 'nqiya.progress';
-const STORAGE_RESULTS = 'nqiya.results';
-const STORAGE_META = 'nqiya.meta';
+const KEYS = {
+  settings: 'nqiya.settings',
+  progress: 'nqiya.progress',
+  results: 'nqiya.results',
+  meta: 'nqiya.meta',
+  simProgress: 'nqiya.simProgress'
+};
+
+const CURRENT_YEAR = new Date().getFullYear();
 
 const DEFAULT_SETTINGS = {
-  beforeYear: 2018,
+  cutoffYear: Math.max(2005, CURRENT_YEAR - 2),
+  cutoffDate: '',
   includeComments: true,
-  includePosts: true
+  includePosts: true,
+  dryRun: true, // ON by default
+  includeMedia: false, // OFF by default
+  cap: 25
 };
+
+// Messages this worker is willing to act on.
+const KNOWN_TYPES = new Set([
+  'NQIYA_PROGRESS',
+  'NQIYA_DONE',
+  'NQIYA_SIM_PROGRESS',
+  'NQIYA_SIM_DONE',
+  'NQIYA_CLEAR_RESULTS'
+]);
 
 function log(...args) {
   try {
@@ -19,12 +40,31 @@ function log(...args) {
   }
 }
 
-// Seed default settings once, without overwriting the user's choices.
+function isTrustedSender(sender) {
+  try {
+    return !!(sender && sender.id === chrome.runtime.id);
+  } catch (_) {
+    return false;
+  }
+}
+
 async function ensureDefaults() {
   try {
-    const stored = await chrome.storage.local.get([STORAGE_SETTINGS]);
-    if (!stored || !stored[STORAGE_SETTINGS]) {
-      await chrome.storage.local.set({ [STORAGE_SETTINGS]: DEFAULT_SETTINGS });
+    const stored = await chrome.storage.local.get([KEYS.settings]);
+    const current = stored && stored[KEYS.settings];
+
+    if (!current || typeof current !== 'object') {
+      await chrome.storage.local.set({ [KEYS.settings]: DEFAULT_SETTINGS });
+      return;
+    }
+
+    // Fill in only the keys that are missing, never overwrite user choices.
+    const patch = {};
+    for (const [key, value] of Object.entries(DEFAULT_SETTINGS)) {
+      if (current[key] === undefined) patch[key] = value;
+    }
+    if (Object.keys(patch).length) {
+      await chrome.storage.local.set({ [KEYS.settings]: { ...current, ...patch } });
     }
   } catch (err) {
     log('ensureDefaults failed', err);
@@ -33,10 +73,9 @@ async function ensureDefaults() {
 
 chrome.runtime.onInstalled.addListener(() => {
   try {
-    Promise.all([
-      ensureDefaults(),
-      chrome.storage.local.remove([STORAGE_PROGRESS])
-    ]).catch((err) => log('install init failed', err));
+    Promise.all([ensureDefaults(), chrome.storage.local.remove([KEYS.progress])]).catch((err) =>
+      log('install init failed', err)
+    );
   } catch (err) {
     log('onInstalled failed', err);
   }
@@ -46,16 +85,15 @@ chrome.runtime.onStartup.addListener(() => {
   ensureDefaults();
 });
 
-/* Relay scan lifecycle messages so the popup panel can recover state even if it
- * was closed while a scan was running. Results themselves live in storage. */
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   try {
-    if (!message || typeof message.type !== 'string') return false;
+    if (!isTrustedSender(sender)) return false;
+    if (!message || typeof message.type !== 'string' || !KNOWN_TYPES.has(message.type)) return false;
 
     if (message.type === 'NQIYA_PROGRESS') {
       if (typeof message.count === 'number') {
         chrome.storage.local
-          .set({ [STORAGE_PROGRESS]: { count: message.count, at: Date.now(), done: false } })
+          .set({ [KEYS.progress]: { count: message.count, at: Date.now(), done: false } })
           .catch(() => {});
       }
       sendResponse({ ok: true });
@@ -64,7 +102,22 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === 'NQIYA_DONE') {
       chrome.storage.local
-        .set({ [STORAGE_PROGRESS]: { count: message.count || 0, at: Date.now(), done: true } })
+        .set({ [KEYS.progress]: { count: message.count || 0, at: Date.now(), done: true } })
+        .catch(() => {});
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (message.type === 'NQIYA_SIM_PROGRESS' || message.type === 'NQIYA_SIM_DONE') {
+      chrome.storage.local
+        .set({
+          [KEYS.simProgress]: {
+            at: Date.now(),
+            done: message.type === 'NQIYA_SIM_DONE',
+            index: typeof message.index === 'number' ? message.index : null,
+            total: typeof message.total === 'number' ? message.total : null
+          }
+        })
         .catch(() => {});
       sendResponse({ ok: true });
       return false;
@@ -72,13 +125,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     if (message.type === 'NQIYA_CLEAR_RESULTS') {
       chrome.storage.local
-        .remove([STORAGE_RESULTS, STORAGE_META, STORAGE_PROGRESS])
+        .remove([KEYS.results, KEYS.meta, KEYS.progress, KEYS.simProgress])
         .then(() => sendResponse({ ok: true }))
         .catch((err) => {
           log('clear failed', err);
           sendResponse({ ok: false, error: 'CLEAR_FAILED' });
         });
-      return true; // async response
+      return true;
     }
 
     return false;
