@@ -79,6 +79,10 @@
       'span[aria-label]',
       '[title]'
     ],
+    // Root element that contains the activity list.
+    mainRoot: ['div[role="main"]'],
+    // Any anchor, used only to detect that a row has links at all.
+    anyAnchor: ['a[href]'],
     // Scrollable containers to try when loading more items.
     scrollContainers: ['div[role="main"]', 'div[role="feed"]', 'div[data-pagelet="root"]'],
     // Fallback: how many ancestors to climb from a permalink anchor to find the item.
@@ -193,6 +197,8 @@
     ],
     // Regions Facebook uses to announce problems.
     liveRegionSelectors: ['div[role="alert"]', 'div[role="status"]'],
+    // Elements whose visible text is kept verbatim in diagnostic captures.
+    captureKeepTextSelector: '[role="menuitem"], [role="menuitemradio"], [role="button"], button',
     // UI strings shown in the popup log (Arabic).
     ui: {
       rowNotFound: 'ما لقينا الصف في الصفحة — تم التخطي',
@@ -204,7 +210,13 @@
       menuOpened: 'فتحنا القائمة',
       dryRunDone: 'انتهت المحاكاة بدون أي حذف',
       stoppedByUser: 'توقف بناءً على طلبك',
-      warningDetected: 'فيسبوك طلب منك التوقف، استراحة 10 دقائق'
+      warningDetected: 'فيسبوك طلب منك التوقف، استراحة 10 دقائق',
+      deletedOne: 'تم الحذف والتحقق',
+      rowStillThere: 'العنصر ما اختفى — فشل',
+      confirmNotFound: 'ما لقينا زر التأكيد في النافذة — فشل',
+      deleteClickFailed: 'ما قدرنا ننقر خيار الحذف — فشل',
+      finished: 'انتهت العملية',
+      nothingToDo: 'ما فيه عناصر جديدة للحذف'
     }
   };
 
@@ -222,7 +234,7 @@
   const STORAGE_META = 'nqiya.meta';
   const STORAGE_PROGRESS = 'nqiya.progress';
 
-  const state = { running: false, simulating: false, stopRequested: false };
+  const state = { running: false, simulating: false, deleting: false, stopRequested: false };
 
   /* =========================================================================
    * Small helpers
@@ -466,7 +478,11 @@
    * Item discovery
    * ========================================================================= */
   function getRoot() {
-    return document.querySelector('div[role="main"]') || document.body;
+    for (const selector of SELECTORS.mainRoot) {
+      const node = document.querySelector(selector);
+      if (node) return node;
+    }
+    return document.body;
   }
 
   function isLikelyItem(element) {
@@ -475,7 +491,7 @@
       const text = element.innerText || element.textContent || '';
       const trimmed = text.trim();
       if (trimmed.length < 10 || trimmed.length > 2500) return false;
-      return element.querySelector('a[href]') !== null;
+      return element.querySelector(SELECTORS.anyAnchor.join(',')) !== null;
     } catch (_) {
       return false;
     }
@@ -587,7 +603,7 @@
 
   function extractLink(element) {
     try {
-      const anchors = Array.from(element.querySelectorAll('a[href]'));
+      const anchors = Array.from(element.querySelectorAll(SELECTORS.anyAnchor.join(',')));
       let best = null;
       let bestScore = 0;
       for (const anchor of anchors) {
@@ -913,9 +929,8 @@
   async function waitForMenus(timeoutMs) {
     const started = Date.now();
     while (Date.now() - started < timeoutMs) {
-      const menus = visibleMenus().filter(
-        (menu) => menu.querySelector('[role="menuitem"], [role="menuitemradio"], [role="button"]') !== null
-      );
+      const optionSelector = DELETE_SELECTORS.menuOptions.join(',');
+      const menus = visibleMenus().filter((menu) => menu.querySelector(optionSelector) !== null);
       if (menus.length) return menus;
       if (state.stopRequested) return [];
       await sleep(200);
@@ -998,7 +1013,7 @@
    * ========================================================================= */
   function sanitizeCapture(root) {
     const skipTags = new Set(['script', 'style', 'svg', 'path', 'noscript', 'link', 'meta', 'img', 'i']);
-    const keepTextSelector = '[role="menuitem"], [role="menuitemradio"], [role="button"], button';
+    const keepTextSelector = DELETE_SELECTORS.captureKeepTextSelector;
 
     function walk(node, depth) {
       if (!node || depth > 16) return '';
@@ -1046,8 +1061,8 @@
    * Never clicks an option.
    * ========================================================================= */
   async function captureMenuDiagnostics() {
-    if (!isActivityLogPage()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
-    if (state.running || state.simulating) return { ok: false, error: 'ALREADY_RUNNING' };
+    if (!isActivityLogPage() || !isAllActivityUrl()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
+    if (state.running || state.simulating || state.deleting) return { ok: false, error: 'ALREADY_RUNNING' };
 
     const rows = findItemContainers();
     if (!rows.length) return { ok: false, error: 'NO_ROWS' };
@@ -1126,9 +1141,9 @@
     const ids = Array.isArray(options.ids) ? options.ids.filter((id) => typeof id === 'string').slice(0, 100) : [];
     const includeMedia = options.includeMedia === true;
 
-    if (!isActivityLogPage()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
+    if (!isActivityLogPage() || !isAllActivityUrl()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
     if (!ids.length) return { ok: false, error: 'NO_IDS' };
-    if (state.running || state.simulating) return { ok: false, error: 'ALREADY_RUNNING' };
+    if (state.running || state.simulating || state.deleting) return { ok: false, error: 'ALREADY_RUNNING' };
 
     state.simulating = true;
     state.stopRequested = false;
@@ -1211,6 +1226,420 @@
   }
 
   /* =========================================================================
+   * Deletion engine — every click target is allowlisted by its visible label.
+   * ========================================================================= */
+  const STORAGE_DELETED = 'nqiya.deleted';
+  const STORAGE_DELETE_PROGRESS = 'nqiya.deleteProgress';
+  const STORAGE_TEST_DELETE = 'nqiya.testDelete';
+
+  const DELETE_LIMITS = {
+    defaultCap: 25,
+    maxCap: 100,
+    delayMin: 2500,
+    delayMax: 5000,
+    pauseEvery: 10,
+    pauseMin: 20000,
+    pauseMax: 40000,
+    maxConsecutiveFailures: 3,
+    verifyTimeout: 8000,
+    menuTimeout: 5000,
+    dialogTimeout: 3000
+  };
+
+  function isAllActivityUrl() {
+    try {
+      return /allactivity/i.test(`${location.pathname}${location.search}`);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function visibleDialog() {
+    try {
+      for (const selector of DELETE_SELECTORS.dialog) {
+        for (const node of document.querySelectorAll(selector)) {
+          if (node.getClientRects().length === 0) continue;
+          if (DELETE_SELECTORS.dialogButtons.some((sel) => node.querySelector(sel))) return node;
+        }
+      }
+    } catch (err) {
+      log('visibleDialog failed', err);
+    }
+    return null;
+  }
+
+  async function waitForDialog(timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const dialog = visibleDialog();
+      if (dialog) return dialog;
+      if (state.stopRequested) return null;
+      await sleep(250);
+    }
+    return null;
+  }
+
+  function findConfirmButton(dialog) {
+    const wanted = DELETE_SELECTORS.confirmTexts.map(normalizeUiText).filter(Boolean);
+    const forbidden = DELETE_SELECTORS.forbiddenOptionTexts.map(normalizeUiText).filter(Boolean);
+    const candidates = [];
+
+    try {
+      for (const selector of DELETE_SELECTORS.dialogButtons) {
+        for (const node of dialog.querySelectorAll(selector)) {
+          if (node.getClientRects().length === 0) continue;
+          const label = normalizeUiText(node.innerText || node.textContent);
+          if (!label || label.length > 40) continue;
+          if (candidates.some((c) => c.node === node)) continue;
+          candidates.push({ node, label });
+        }
+      }
+    } catch (err) {
+      log('findConfirmButton failed', err);
+    }
+
+    const isForbidden = (label) => forbidden.some((bad) => label === bad);
+    for (const pass of ['exact', 'prefix']) {
+      for (const candidate of candidates) {
+        if (isForbidden(candidate.label)) continue;
+        for (const want of wanted) {
+          if (pass === 'exact' && candidate.label === want) return { node: candidate.node, label: candidate.label };
+          if (pass === 'prefix' && want.length >= 4 && candidate.label.startsWith(want)) {
+            return { node: candidate.node, label: candidate.label };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // Facebook may show a warning in a live region or a dialog; look there only.
+  function detectWarning() {
+    let text = '';
+    try {
+      for (const selector of DELETE_SELECTORS.liveRegionSelectors) {
+        for (const node of document.querySelectorAll(selector)) {
+          if (node.getClientRects().length === 0) continue;
+          text += ` ${node.innerText || ''}`;
+          if (text.length > 1500) break;
+        }
+      }
+      const dialog = visibleDialog();
+      if (dialog) text += ` ${(dialog.innerText || '').slice(0, 800)}`;
+    } catch (err) {
+      log('detectWarning failed', err);
+    }
+
+    const value = normalizeUiText(text);
+    if (!value) return false;
+    return DELETE_SELECTORS.warningTexts.some((phrase) => {
+      const wanted = normalizeUiText(phrase);
+      return wanted.length >= 4 && value.includes(wanted);
+    });
+  }
+
+  async function waitForRowGone(id, timeoutMs, row) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (state.stopRequested) return false;
+      if (row && row.isConnected === false) return true;
+      let stillThere = false;
+      for (const candidate of findItemContainers()) {
+        if (rowItemId(candidate) === id) {
+          stillThere = true;
+          break;
+        }
+      }
+      if (!stillThere) return true;
+      await sleep(400);
+    }
+    return false;
+  }
+
+  async function readDeletedMap() {
+    try {
+      const stored = await chrome.storage.local.get([STORAGE_DELETED]);
+      const map = stored[STORAGE_DELETED];
+      return map && typeof map === 'object' ? map : {};
+    } catch (err) {
+      log('readDeletedMap failed', err);
+      return {};
+    }
+  }
+
+  async function saveDeletedMap(map) {
+    try {
+      await chrome.storage.local.set({ [STORAGE_DELETED]: map });
+    } catch (err) {
+      log('saveDeletedMap failed', err);
+    }
+  }
+
+  async function saveDeleteProgress(payload) {
+    try {
+      await chrome.storage.local.set({ [STORAGE_DELETE_PROGRESS]: payload });
+    } catch (err) {
+      log('saveDeleteProgress failed', err);
+    }
+  }
+
+  // Deletes exactly one already-scanned item; returns a status the queue reads.
+  async function deleteOneItem(id, options) {
+    const row = await findRowById(id, 12);
+    if (!row) return { status: 'skipped', message: DELETE_SELECTORS.ui.rowNotFound };
+
+    const dateInfo = extractDate(row);
+    const rowText = extractText(row, dateInfo);
+    if (!options.includeMedia && isMediaItem(rowText)) {
+      return { status: 'skipped', message: DELETE_SELECTORS.ui.skippedMedia };
+    }
+
+    const button = findMenuButton(row);
+    if (!button) return { status: 'skipped', message: DELETE_SELECTORS.ui.menuButtonNotFound };
+
+    try {
+      row.scrollIntoView({ block: 'center', inline: 'nearest' });
+      await abortableSleep(300 + Math.floor(Math.random() * 300));
+    } catch (_) {
+      return { status: 'aborted', message: DELETE_SELECTORS.ui.stoppedByUser };
+    }
+
+    if (!activateMenuButton(button)) {
+      return { status: 'skipped', message: DELETE_SELECTORS.ui.menuButtonNotFound };
+    }
+
+    const menus = await waitForMenus(DELETE_LIMITS.menuTimeout);
+    if (!menus.length) {
+      closeMenu();
+      return { status: 'failed', message: DELETE_SELECTORS.ui.menuNotFound };
+    }
+
+    const option = findMenuOption(menus);
+    if (!option) {
+      closeMenu();
+      return { status: 'skipped', message: DELETE_SELECTORS.ui.notDeletable };
+    }
+
+    if (detectWarning()) {
+      closeMenu();
+      return { status: 'warning', message: DELETE_SELECTORS.ui.warningDetected };
+    }
+
+    // The only click on a menu item in this file: an allowlisted delete option.
+    try {
+      option.node.click();
+    } catch (err) {
+      log('delete option click failed', err);
+      closeMenu();
+      return { status: 'failed', message: DELETE_SELECTORS.ui.deleteClickFailed };
+    }
+
+    let captured = '';
+    const dialog = await waitForDialog(DELETE_LIMITS.dialogTimeout);
+    if (dialog) {
+      if (options.captureDialog) captured = sanitizeCapture(dialog);
+      if (detectWarning()) {
+        closeMenu();
+        if (captured) sendToRuntime({ type: 'NQIYA_DIALOG_HTML', html: captured });
+        return { status: 'warning', message: DELETE_SELECTORS.ui.warningDetected };
+      }
+
+      const confirm = findConfirmButton(dialog);
+      if (!confirm) {
+        closeMenu();
+        if (captured) sendToRuntime({ type: 'NQIYA_DIALOG_HTML', html: captured });
+        return { status: 'failed', message: DELETE_SELECTORS.ui.confirmNotFound };
+      }
+
+      // The only click on a dialog button: an allowlisted confirm label.
+      try {
+        confirm.node.click();
+      } catch (err) {
+        log('confirm click failed', err);
+        closeMenu();
+        return { status: 'failed', message: DELETE_SELECTORS.ui.confirmNotFound };
+      }
+    }
+
+    if (captured) sendToRuntime({ type: 'NQIYA_DIALOG_HTML', html: captured });
+
+    const gone = await waitForRowGone(id, DELETE_LIMITS.verifyTimeout, row);
+    if (!gone) return { status: 'failed', message: DELETE_SELECTORS.ui.rowStillThere };
+    return { status: 'deleted', message: DELETE_SELECTORS.ui.deletedOne };
+  }
+
+  function normalizeDeleteOptions(raw) {
+    const options = raw && typeof raw === 'object' ? raw : {};
+    const cap = Math.min(
+      DELETE_LIMITS.maxCap,
+      Math.max(1, Number(options.cap) || DELETE_LIMITS.defaultCap)
+    );
+    const ids = Array.isArray(options.ids)
+      ? options.ids.filter((id) => typeof id === 'string').slice(0, cap)
+      : [];
+
+    return {
+      ids,
+      cap,
+      includeMedia: options.includeMedia === true,
+      captureDialog: options.captureDialog === true,
+      single: options.mode === 'single'
+    };
+  }
+
+  async function runDeletion(rawOptions) {
+    const options = normalizeDeleteOptions(rawOptions);
+
+    if (!isActivityLogPage() || !isAllActivityUrl()) return { ok: false, error: 'NOT_ACTIVITY_LOG' };
+    if (!options.ids.length) return { ok: false, error: 'NO_IDS' };
+    if (state.running || state.simulating || state.deleting) return { ok: false, error: 'ALREADY_RUNNING' };
+
+    state.deleting = true;
+    state.stopRequested = false;
+
+    const deletedMap = await readDeletedMap();
+    const pending = options.ids.filter((id) => !deletedMap[id]);
+    const total = pending.length;
+
+    let deleted = 0;
+    let failed = 0;
+    let skipped = 0;
+    let consecutive = 0;
+    let warning = false;
+    let aborted = false;
+    let processed = 0;
+
+    if (!total) {
+      state.deleting = false;
+      const payload = {
+        type: 'NQIYA_DELETE_DONE',
+        done: 0,
+        total: 0,
+        failed: 0,
+        skipped: 0,
+        stopped: false,
+        warning: false,
+        message: DELETE_SELECTORS.ui.nothingToDo
+      };
+      await saveDeleteProgress({ done: 0, total: 0, at: Date.now(), finished: true });
+      sendToRuntime(payload);
+      return { ok: true, done: 0, total: 0 };
+    }
+
+    try {
+      for (const id of pending) {
+        if (state.stopRequested) {
+          aborted = true;
+          break;
+        }
+        processed += 1;
+
+        const result = await deleteOneItem(id, options);
+
+        if (result.status === 'deleted') {
+          deleted += 1;
+          consecutive = 0;
+          deletedMap[id] = Date.now();
+          await saveDeletedMap(deletedMap);
+        } else if (result.status === 'failed') {
+          failed += 1;
+          consecutive += 1;
+        } else if (result.status === 'skipped') {
+          skipped += 1;
+        } else if (result.status === 'warning') {
+          warning = true;
+        } else if (result.status === 'aborted') {
+          aborted = true;
+          break;
+        }
+
+        const payload = {
+          done: deleted,
+          total,
+          failed,
+          skipped,
+          index: processed,
+          message: result.message,
+          at: Date.now()
+        };
+        await saveDeleteProgress(payload);
+        sendToRuntime({ type: 'NQIYA_DELETE_PROGRESS', ...payload });
+
+        if (warning) break;
+        if (consecutive >= DELETE_LIMITS.maxConsecutiveFailures) break;
+        if (options.single && deleted >= 1) break;
+        if (deleted >= total) break;
+
+        try {
+          if (deleted > 0 && deleted % DELETE_LIMITS.pauseEvery === 0) {
+            await abortableSleep(randomBetween(DELETE_LIMITS.pauseMin, DELETE_LIMITS.pauseMax));
+          } else {
+            await abortableSleep(randomBetween(DELETE_LIMITS.delayMin, DELETE_LIMITS.delayMax));
+          }
+        } catch (_) {
+          aborted = true;
+          break;
+        }
+      }
+    } catch (err) {
+      log('runDeletion failed', err);
+    } finally {
+      closeMenu();
+      state.deleting = false;
+    }
+
+    const stopped = aborted || state.stopRequested;
+    state.stopRequested = false;
+
+    // A verified single-item test is the only thing that unlocks batch deletion.
+    if (options.single) {
+      try {
+        if (deleted >= 1) {
+          await chrome.storage.local.set({
+            [STORAGE_TEST_DELETE]: {
+              ok: true,
+              version: chrome.runtime.getManifest().version,
+              at: Date.now()
+            }
+          });
+        } else {
+          await chrome.storage.local.remove([STORAGE_TEST_DELETE]);
+        }
+      } catch (err) {
+        log('test flag failed', err);
+      }
+    }
+
+    const message = warning
+      ? DELETE_SELECTORS.ui.warningDetected
+      : stopped
+        ? DELETE_SELECTORS.ui.stoppedByUser
+        : DELETE_SELECTORS.ui.finished;
+
+    await saveDeleteProgress({
+      done: deleted,
+      total,
+      failed,
+      skipped,
+      at: Date.now(),
+      finished: true,
+      stopped,
+      warning
+    });
+    sendToRuntime({
+      type: 'NQIYA_DELETE_DONE',
+      done: deleted,
+      total,
+      failed,
+      skipped,
+      stopped,
+      warning,
+      message
+    });
+    return { ok: true, done: deleted, total, failed, skipped, stopped, warning };
+  }
+
+  /* =========================================================================
    * Message handling
    * ========================================================================= */
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -1225,12 +1654,13 @@
             ok: true,
             isActivityLog: isActivityLogPage(),
             scanning: state.running,
-            simulating: state.simulating
+            simulating: state.simulating,
+            deleting: state.deleting
           });
           return false;
 
         case 'NQIYA_SCAN': {
-          if (state.running) {
+          if (state.running || state.simulating || state.deleting) {
             sendResponse({ ok: false, error: 'ALREADY_RUNNING' });
             return false;
           }
@@ -1246,12 +1676,27 @@
           return false;
 
         case 'NQIYA_SIMULATE': {
-          if (state.running || state.simulating) {
+          if (state.running || state.simulating || state.deleting) {
             sendResponse({ ok: false, error: 'ALREADY_RUNNING' });
             return false;
           }
           // Runs in the background so a long simulation can outlive the popup.
           simulateDeletion(message.options || {});
+          sendResponse({ ok: true, started: true });
+          return false;
+        }
+
+        case 'NQIYA_DELETE': {
+          if (state.running || state.simulating || state.deleting) {
+            sendResponse({ ok: false, error: 'ALREADY_RUNNING' });
+            return false;
+          }
+          if (!isActivityLogPage() || !isAllActivityUrl()) {
+            sendResponse({ ok: false, error: 'NOT_ACTIVITY_LOG' });
+            return false;
+          }
+          // Runs in the background so a long batch can outlive the popup.
+          runDeletion(message.options || {});
           sendResponse({ ok: true, started: true });
           return false;
         }

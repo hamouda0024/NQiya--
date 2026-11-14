@@ -104,7 +104,54 @@
 
         <ul id="simLog" class="sim-log" aria-label="سجل المحاكاة"></ul>
       </section>
+
+      <section class="card danger-card">
+        <h2 class="card-title">حذف آمن</h2>
+
+        <ul id="gateList" class="gates" aria-label="شروط الحذف"></ul>
+
+        <div class="actions">
+          <button id="testDeleteBtn" class="btn btn-secondary btn-small" type="button" disabled>
+            جرّب حذف عنصر واحد
+          </button>
+        </div>
+
+        <div class="actions">
+          <button id="deleteBtn" class="btn btn-danger" type="button" disabled>حذف العناصر المحددة</button>
+        </div>
+
+        <div id="progressWrap" class="progress-wrap" hidden>
+          <div class="progress-bar"><div id="progressFill" class="progress-fill"></div></div>
+          <p id="progressLabel" class="hint"></p>
+        </div>
+
+        <div class="actions">
+          <button id="deleteStopBtn" class="btn btn-danger-ghost btn-small" type="button" hidden>
+            إيقاف فوري
+          </button>
+        </div>
+
+        <p class="hint">
+          المنشورات المنقولة إلى سلة المهملات قد تكون قابلة للاسترجاع لمدة محدودة، أما التعليقات المحذوفة فحذفها نهائي.
+        </p>
+        <p class="warning">
+          عناصر «تمت إضافة صورة/فيديو» قد تحذف الوسائط نفسها. لا تفعّل «تضمين عناصر الصور والفيديو» إلا إذا كنت تريد ذلك.
+        </p>
+      </section>
     </main>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <h2 id="modalTitle" class="card-title">تأكيد الحذف</h2>
+        <div id="modalBody" class="modal-body"></div>
+        <label class="label" for="confirmWord">اكتب كلمة «احذف» للتأكيد</label>
+        <input id="confirmWord" class="select" type="text" autocomplete="off" />
+        <div class="actions modal-actions">
+          <button id="modalConfirm" class="btn btn-danger" type="button" disabled>تأكيد الحذف</button>
+          <button id="modalCancel" class="btn btn-ghost" type="button">إلغاء</button>
+        </div>
+      </div>
+    </div>
 
     <script src="popup.js"></script>
   </body>

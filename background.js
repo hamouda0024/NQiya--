@@ -29,8 +29,14 @@ const KNOWN_TYPES = new Set([
   'NQIYA_DONE',
   'NQIYA_SIM_PROGRESS',
   'NQIYA_SIM_DONE',
+  'NQIYA_DELETE_PROGRESS',
+  'NQIYA_DELETE_DONE',
+  'NQIYA_DIALOG_HTML',
   'NQIYA_CLEAR_RESULTS'
 ]);
+
+const STORAGE_TEST_DELETE = 'nqiya.testDelete';
+const STORAGE_DELETE_PROGRESS = 'nqiya.deleteProgress';
 
 function log(...args) {
   try {
@@ -71,11 +77,26 @@ async function ensureDefaults() {
   }
 }
 
+// A single-item test only counts for the extension version that performed it.
+async function resetTestFlagOnVersionChange() {
+  try {
+    const stored = await chrome.storage.local.get([STORAGE_TEST_DELETE]);
+    const flag = stored && stored[STORAGE_TEST_DELETE];
+    if (flag && flag.version !== chrome.runtime.getManifest().version) {
+      await chrome.storage.local.remove([STORAGE_TEST_DELETE]);
+    }
+  } catch (err) {
+    log('test flag reset failed', err);
+  }
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   try {
-    Promise.all([ensureDefaults(), chrome.storage.local.remove([KEYS.progress])]).catch((err) =>
-      log('install init failed', err)
-    );
+    Promise.all([
+      ensureDefaults(),
+      resetTestFlagOnVersionChange(),
+      chrome.storage.local.remove([KEYS.progress])
+    ]).catch((err) => log('install init failed', err));
   } catch (err) {
     log('onInstalled failed', err);
   }
@@ -83,6 +104,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   ensureDefaults();
+  resetTestFlagOnVersionChange();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -103,6 +125,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'NQIYA_DONE') {
       chrome.storage.local
         .set({ [KEYS.progress]: { count: message.count || 0, at: Date.now(), done: true } })
+        .catch(() => {});
+      sendResponse({ ok: true });
+      return false;
+    }
+
+    if (message.type === 'NQIYA_DELETE_PROGRESS' || message.type === 'NQIYA_DELETE_DONE') {
+      chrome.storage.local
+        .set({
+          [STORAGE_DELETE_PROGRESS]: {
+            at: Date.now(),
+            done: typeof message.done === 'number' ? message.done : 0,
+            total: typeof message.total === 'number' ? message.total : 0,
+            finished: message.type === 'NQIYA_DELETE_DONE',
+            stopped: message.stopped === true,
+            warning: message.warning === true
+          }
+        })
         .catch(() => {});
       sendResponse({ ok: true });
       return false;

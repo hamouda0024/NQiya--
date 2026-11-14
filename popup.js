@@ -9,7 +9,10 @@ const KEYS = {
   progress: 'nqiya.progress',
   settings: 'nqiya.settings',
   excluded: 'nqiya.excluded',
-  backup: 'nqiya.backup'
+  backup: 'nqiya.backup',
+  deleted: 'nqiya.deleted',
+  deleteProgress: 'nqiya.deleteProgress',
+  testDelete: 'nqiya.testDelete'
 };
 
 const MONTHS_AR = [
@@ -57,15 +60,34 @@ const el = {
   simBtn: document.getElementById('simBtn'),
   calMenuBtn: document.getElementById('calMenuBtn'),
   calDialogBtn: document.getElementById('calDialogBtn'),
-  simLog: document.getElementById('simLog')
+  simLog: document.getElementById('simLog'),
+  gateList: document.getElementById('gateList'),
+  testDeleteBtn: document.getElementById('testDeleteBtn'),
+  deleteBtn: document.getElementById('deleteBtn'),
+  progressWrap: document.getElementById('progressWrap'),
+  progressFill: document.getElementById('progressFill'),
+  progressLabel: document.getElementById('progressLabel'),
+  deleteStopBtn: document.getElementById('deleteStopBtn'),
+  modal: document.getElementById('modal'),
+  modalBody: document.getElementById('modalBody'),
+  confirmWord: document.getElementById('confirmWord'),
+  modalConfirm: document.getElementById('modalConfirm'),
+  modalCancel: document.getElementById('modalCancel')
 };
 
 let items = [];
 let excluded = {};
 let meta = {};
+let backup = null;
+let testDelete = null;
+let deletedItems = {};
 let initialized = false;
 let scanning = false;
 let simulating = false;
+let deleting = false;
+let deleteMode = 'batch';
+let dialogCaptureArmed = false;
+let lastDialogHtml = '';
 let pollTimer = null;
 let scanStartedAt = 0;
 
@@ -183,7 +205,7 @@ function renderDistribution() {
 }
 
 function selectedItems() {
-  return items.filter((item) => item && item.id && !excluded[item.id]);
+  return items.filter((item) => item && item.id && !excluded[item.id] && !deletedItems[item.id]);
 }
 
 function updateCounter() {
@@ -208,7 +230,8 @@ function renderResults(list) {
     checkLabel.className = 'item-check';
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
-    checkbox.checked = !excluded[item.id];
+    checkbox.checked = !excluded[item.id] && !deletedItems[item.id];
+    checkbox.disabled = !!deletedItems[item.id];
     checkbox.setAttribute('aria-label', 'تضمين العنصر في الحذف');
     checkbox.addEventListener('change', () => {
       if (checkbox.checked) delete excluded[item.id];
@@ -243,6 +266,13 @@ function renderResults(list) {
       mediaBadge.className = 'badge badge-media';
       mediaBadge.textContent = 'صور/فيديو';
       left.append(mediaBadge);
+    }
+
+    if (deletedItems[item.id]) {
+      const deletedBadge = document.createElement('span');
+      deletedBadge.className = 'badge';
+      deletedBadge.textContent = 'تم حذفه';
+      left.append(deletedBadge);
     }
 
     const link = document.createElement('a');
@@ -323,11 +353,23 @@ async function loadStoredState() {
       KEYS.results,
       KEYS.meta,
       KEYS.progress,
-      KEYS.excluded
+      KEYS.excluded,
+      KEYS.backup,
+      KEYS.testDelete,
+      KEYS.deleted,
+      KEYS.deleteProgress
     ]);
 
     excluded = stored[KEYS.excluded] && typeof stored[KEYS.excluded] === 'object' ? stored[KEYS.excluded] : {};
     meta = stored[KEYS.meta] || {};
+    backup = stored[KEYS.backup] || null;
+    testDelete = stored[KEYS.testDelete] || null;
+    deletedItems = stored[KEYS.deleted] && typeof stored[KEYS.deleted] === 'object' ? stored[KEYS.deleted] : {};
+
+    const lastDelete = stored[KEYS.deleteProgress];
+    if (lastDelete && typeof lastDelete.done === 'number' && typeof lastDelete.total === 'number') {
+      showProgress(lastDelete.done, lastDelete.total, lastDelete.finished ? 'آخر جلسة' : '');
+    }
 
     if (Array.isArray(stored[KEYS.results])) {
       renderResults(stored[KEYS.results]);
@@ -343,6 +385,27 @@ async function loadStoredState() {
     }
   } catch (err) {
     console.warn('[NQiya] loadStoredState failed', err);
+  }
+}
+
+async function loadDeletedState() {
+  try {
+    const stored = await chrome.storage.local.get([
+      KEYS.deleted,
+      KEYS.testDelete,
+      KEYS.deleteProgress,
+      KEYS.backup
+    ]);
+    deletedItems = stored[KEYS.deleted] && typeof stored[KEYS.deleted] === 'object' ? stored[KEYS.deleted] : {};
+    testDelete = stored[KEYS.testDelete] || null;
+    backup = stored[KEYS.backup] || backup;
+
+    const progress = stored[KEYS.deleteProgress];
+    if (progress && typeof progress.done === 'number' && typeof progress.total === 'number' && progress.total > 0) {
+      showProgress(progress.done, progress.total, progress.finished ? 'آخر جلسة' : '');
+    }
+  } catch (err) {
+    console.warn('[NQiya] loadDeletedState failed', err);
   }
 }
 
@@ -601,6 +664,166 @@ async function copyDebugHtml() {
 /* ------------------------------------------------------------------ */
 /* Dry-run simulation                                                  */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Safe deletion                                                       */
+/* ------------------------------------------------------------------ */
+function showProgress(done, total, message) {
+  el.progressWrap.hidden = false;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  el.progressFill.style.width = `${pct}%`;
+  el.progressLabel.textContent = `تم حذف ${done} من ${total}${message ? ` — ${message}` : ''}`;
+}
+
+function setDeletingState(busy) {
+  deleting = busy;
+  if (busy) el.stopBtn.hidden = false;
+  else if (!scanning && !simulating) el.stopBtn.hidden = true;
+  el.deleteStopBtn.hidden = !busy;
+  el.testDeleteBtn.textContent = busy ? 'جاري التنفيذ…' : 'جرّب حذف عنصر واحد';
+  updateButtons();
+}
+
+function openConfirmModal(mode) {
+  const gates = gateState();
+  const selected = selectedItems().slice(0, clampCap());
+
+  if (!selected.length) {
+    setStatus('ما فيه عناصر محددة.', 'error');
+    return;
+  }
+  // Belt and braces: refuse to open if any gate is still closed.
+  if (!(gates.hasResults && gates.backupOk && gates.dryRunOff)) return;
+  if (mode === 'batch' && !gates.testOk) return;
+
+  const newest = selected[0];
+  el.modalBody.textContent = '';
+
+  const addLine = (label, value) => {
+    const p = document.createElement('p');
+    p.className = 'modal-line';
+    p.textContent = `${label}: ${value}`;
+    el.modalBody.append(p);
+  };
+
+  addLine('عدد العناصر', String(selected.length));
+  addLine('القطع', `قبل ${gates.cutoff.label}`);
+  addLine('أحدث عنصر', `${newest.date || 'بدون تاريخ'} — ${String(newest.text || '').slice(0, 90)}`);
+  if (mode === 'single') addLine('الوضع', 'حذف عنصر واحد للتجربة');
+
+  if (gates.recent) {
+    const warn = document.createElement('p');
+    warn.className = 'modal-warn';
+    warn.textContent =
+      'تحذير: القطع في السنة الحالية أو السابقة. «أحدث عنصر» أعلاه هو أول ما سيُحذف — راجعه قبل التأكيد.';
+    el.modalBody.append(warn);
+
+    const ackLabel = document.createElement('label');
+    ackLabel.className = 'switch';
+    const ack = document.createElement('input');
+    ack.type = 'checkbox';
+    ack.id = 'recentAck';
+    const ackText = document.createElement('span');
+    ackText.textContent = 'أفهم أن هذا النطاق حديث وأريد المتابعة';
+    ackLabel.append(ack, ackText);
+    el.modalBody.append(ackLabel);
+    ack.addEventListener('change', updateModalConfirm);
+  }
+
+  el.modal.dataset.mode = mode;
+  el.modal.dataset.recent = gates.recent ? '1' : '0';
+  el.confirmWord.value = '';
+  updateModalConfirm();
+  el.modal.hidden = false;
+  el.confirmWord.focus();
+}
+
+function closeModal() {
+  el.modal.hidden = true;
+  el.confirmWord.value = '';
+}
+
+function updateModalConfirm() {
+  const typed = el.confirmWord.value.trim() === 'احذف';
+  const recent = el.modal.dataset.recent === '1';
+  const ack = document.getElementById('recentAck');
+  const ackOk = !recent || !!(ack && ack.checked);
+  el.modalConfirm.disabled = !(typed && ackOk);
+}
+
+async function startDeletion(mode) {
+  if (deleting || scanning || simulating) return;
+
+  const selected = selectedItems().slice(0, clampCap());
+  const ids = mode === 'single' ? selected.slice(0, 1).map((item) => item.id) : selected.map((item) => item.id);
+  if (!ids.length) {
+    setStatus('ما فيه عناصر محددة للحذف.', 'error');
+    return;
+  }
+
+  try {
+    const target = await requireActivityLogTab();
+    if (!target.ok) {
+      reportActivityTabError(target.reason);
+      return;
+    }
+    if (target.ping.deleting) {
+      setStatus('في عملية حذف شغّالة بالفعل في هذه الصفحة.', 'error');
+      return;
+    }
+
+    await saveSettings();
+    lastDialogHtml = '';
+    dialogCaptureArmed = mode === 'single';
+    deleteMode = mode;
+    setDeletingState(true);
+    showProgress(0, ids.length, '');
+
+    const response = await sendToTab(target.tab.id, {
+      type: 'NQIYA_DELETE',
+      options: {
+        ids,
+        cap: ids.length,
+        includeMedia: el.includeMedia.checked,
+        captureDialog: mode === 'single',
+        mode
+      }
+    });
+
+    if (!response || !response.ok) {
+      setDeletingState(false);
+      const code = response && response.error;
+      if (code === 'NOT_ACTIVITY_LOG') setStatus('هذه الصفحة ليست «سجل النشاط».', 'error');
+      else if (code === 'ALREADY_RUNNING') setStatus('في عملية شغّالة بالفعل.', 'error');
+      else setStatus('ما قدرنا نبدأ الحذف.', 'error');
+      return;
+    }
+
+    setStatus(
+      mode === 'single' ? 'جاري حذف عنصر واحد للتجربة…' : `جاري الحذف… ${ids.length} عنصر.`,
+      'ok'
+    );
+  } catch (err) {
+    console.warn('[NQiya] startDeletion failed', err);
+    setDeletingState(false);
+    setStatus('صار خطأ غير متوقع أثناء بدء الحذف.', 'error');
+  }
+}
+
+async function armDialogCapture() {
+  if (!(deleting && deleteMode === 'single')) {
+    setStatus('التقاط نافذة التأكيد متاح فقط أثناء تجربة حذف عنصر واحد.', 'error');
+    return;
+  }
+  dialogCaptureArmed = true;
+  if (lastDialogHtml) {
+    const copied = await copyText(lastDialogHtml);
+    dialogCaptureArmed = false;
+    setStatus(copied ? 'تم نسخ HTML لنافذة التأكيد.' : 'تعذّر النسخ للحافظة.', copied ? 'ok' : 'error');
+  } else {
+    setStatus('جاهز: بننسخ نافذة التأكيد أول ما تظهر.', 'ok');
+  }
+}
+
 function appendSimLog(message) {
   if (!message) return;
   const li = document.createElement('li');
@@ -712,12 +935,60 @@ async function captureMenu() {
 /* ------------------------------------------------------------------ */
 /* Buttons / gates                                                     */
 /* ------------------------------------------------------------------ */
+function gateState() {
+  const version = chrome.runtime.getManifest().version;
+  const hasResults = items.length > 0 && !!meta.scannedAt;
+  const backupOk = !!(
+    backup &&
+    meta.scannedAt &&
+    backup.scannedAt === meta.scannedAt &&
+    backup.count === items.length
+  );
+  const dryRunOff = !el.dryRun.checked;
+  const testOk = !!(testDelete && testDelete.ok === true && testDelete.version === version);
+  const cutoff = computeCutoff();
+  const recent = cutoff.year >= CURRENT_YEAR - 1;
+  return { hasResults, backupOk, dryRunOff, testOk, recent, cutoff, version };
+}
+
+function renderGates() {
+  const gates = gateState();
+  const rows = [
+    ['فحص منتهي وفيه نتائج', gates.hasResults],
+    ['نسخة احتياطية محمّلة في هذه الجلسة', gates.backupOk],
+    ['وضع المحاكاة مُطفأ', gates.dryRunOff],
+    ['تم تجربة حذف عنصر واحد بنجاح', gates.testOk]
+  ];
+
+  el.gateList.textContent = '';
+  for (const [label, ok] of rows) {
+    const li = document.createElement('li');
+    if (ok) li.className = 'ok';
+    const mark = document.createElement('span');
+    mark.className = 'gate-mark';
+    mark.textContent = ok ? '✓' : '✕';
+    const text = document.createElement('span');
+    text.textContent = label;
+    li.append(mark, text);
+    el.gateList.append(li);
+  }
+}
+
 function updateButtons() {
-  const busy = scanning || simulating;
+  const busy = scanning || simulating || deleting;
+  const gates = gateState();
+
   el.simBtn.disabled = busy || items.length === 0;
   el.calMenuBtn.disabled = busy;
-  el.calDialogBtn.disabled = true; // enabled only during the single-item test (next commit)
+  el.calDialogBtn.disabled = !(deleting && deleteMode === 'single');
   el.scanBtn.disabled = busy;
+
+  // The real delete button stays disabled until every gate is open.
+  el.testDeleteBtn.disabled = busy || !gates.hasResults || !gates.backupOk || !gates.dryRunOff;
+  el.deleteBtn.disabled = busy || !(gates.hasResults && gates.backupOk && gates.dryRunOff && gates.testOk);
+  el.deleteStopBtn.hidden = !deleting;
+
+  renderGates();
 }
 
 /* ------------------------------------------------------------------ */
@@ -764,6 +1035,40 @@ chrome.runtime.onMessage.addListener((message) => {
         message.stopped ? 'توقفت المحاكاة. ما انحذف أي شيء.' : 'انتهت المحاكاة. ما انحذف أي شيء.',
         'ok'
       );
+      return;
+    }
+
+    if (message.type === 'NQIYA_DELETE_PROGRESS') {
+      showProgress(message.done || 0, message.total || 0, message.message || '');
+      setStatus(`تم حذف ${message.done || 0} من ${message.total || 0}.`, 'ok');
+      return;
+    }
+
+    if (message.type === 'NQIYA_DELETE_DONE') {
+      setDeletingState(false);
+      showProgress(message.done || 0, message.total || 0, message.message || '');
+      loadDeletedState().then(() => renderResults(items));
+      if (message.warning) {
+        setStatus('فيسبوك طلب منك التوقف، استراحة 10 دقائق.', 'error');
+      } else {
+        setStatus(
+          `انتهى الحذف: ${message.done || 0} من ${message.total || 0}` +
+            (message.failed ? ` · فشل ${message.failed}` : '') +
+            (message.skipped ? ` · تخطي ${message.skipped}` : ''),
+          'ok'
+        );
+      }
+      return;
+    }
+
+    if (message.type === 'NQIYA_DIALOG_HTML') {
+      lastDialogHtml = typeof message.html === 'string' ? message.html : '';
+      if (dialogCaptureArmed && lastDialogHtml) {
+        copyText(lastDialogHtml).then((ok) => {
+          dialogCaptureArmed = false;
+          setStatus(ok ? 'تم نسخ HTML لنافذة التأكيد.' : 'تعذّر النسخ للحافظة.', ok ? 'ok' : 'error');
+        });
+      }
     }
   } catch (err) {
     console.warn('[NQiya] popup message failed', err);
@@ -789,7 +1094,10 @@ function wireEvents() {
   });
   el.optComments.addEventListener('change', saveSettings);
   el.optPosts.addEventListener('change', saveSettings);
-  el.dryRun.addEventListener('change', saveSettings);
+  el.dryRun.addEventListener('change', () => {
+    saveSettings();
+    updateButtons();
+  });
   el.includeMedia.addEventListener('change', saveSettings);
   el.capInput.addEventListener('change', () => {
     el.capInput.value = String(clampCap());
@@ -801,6 +1109,17 @@ function wireEvents() {
   el.debugBtn.addEventListener('click', copyDebugHtml);
   el.simBtn.addEventListener('click', startSimulation);
   el.calMenuBtn.addEventListener('click', captureMenu);
+  el.calDialogBtn.addEventListener('click', armDialogCapture);
+  el.testDeleteBtn.addEventListener('click', () => openConfirmModal('single'));
+  el.deleteBtn.addEventListener('click', () => openConfirmModal('batch'));
+  el.deleteStopBtn.addEventListener('click', stopEverything);
+  el.modalCancel.addEventListener('click', closeModal);
+  el.confirmWord.addEventListener('input', updateModalConfirm);
+  el.modalConfirm.addEventListener('click', () => {
+    const mode = el.modal.dataset.mode === 'single' ? 'single' : 'batch';
+    closeModal();
+    startDeletion(mode);
+  });
   el.toggleDist.addEventListener('click', () => {
     el.distribution.hidden = !el.distribution.hidden;
     el.toggleDist.textContent = el.distribution.hidden ? 'توزيع السنوات' : 'إخفاء التوزيع';
@@ -814,6 +1133,7 @@ async function init() {
   wireEvents();
   await loadSettings();
   await loadStoredState();
+  await loadDeletedState();
   renderCutoff();
   updateButtons();
 }
