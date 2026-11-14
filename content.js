@@ -858,10 +858,24 @@
    * ========================================================================= */
   function normalizeUiText(value) {
     return cleanText(value)
-      .replace(/[\u200e\u200f\u202a-\u202e]/g, '')
+      // Invisible bidi marks / isolates / soft hyphen.
+      .replace(/[\u200b-\u200f\u202a-\u202e\u2066-\u2069\u061c\u00ad]/g, '')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
+  }
+
+  function normalizeAllowlist(list) {
+    return new Set((Array.isArray(list) ? list : []).map(normalizeUiText).filter(Boolean));
+  }
+
+  // Single comparison rule for click decisions: EXACT after normalization.
+  // No prefix, no substring, no fuzzy matching.
+  function isExactAllowedLabel(label, allowedSet, forbiddenSet) {
+    const value = normalizeUiText(label);
+    if (!value) return false;
+    if (forbiddenSet && forbiddenSet.has(value)) return false;
+    return allowedSet.has(value);
   }
 
   function escapeHtml(value) {
@@ -938,10 +952,12 @@
     return [];
   }
 
-  // Returns the allowlisted option inside the open menu, or null.
+  // Returns the allowlisted option inside the open menu, or null. The label must
+  // equal an allowlist entry exactly (after normalization) — never a prefix or a
+  // substring. Anything else is skipped, so unknown options are never clicked.
   function findMenuOption(menus) {
-    const wanted = DELETE_SELECTORS.deleteOptionTexts.map(normalizeUiText).filter(Boolean);
-    const forbidden = DELETE_SELECTORS.forbiddenOptionTexts.map(normalizeUiText).filter(Boolean);
+    const allowed = normalizeAllowlist(DELETE_SELECTORS.deleteOptionTexts);
+    const forbidden = normalizeAllowlist(DELETE_SELECTORS.forbiddenOptionTexts);
     const candidates = [];
 
     try {
@@ -949,10 +965,10 @@
         for (const selector of DELETE_SELECTORS.menuOptions) {
           for (const node of menu.querySelectorAll(selector)) {
             if (node.getClientRects().length === 0) continue;
-            const label = normalizeUiText(node.innerText || node.textContent);
-            if (!label || label.length > 80) continue;
+            const visible = node.innerText || node.textContent;
+            if (!normalizeUiText(visible)) continue;
             if (candidates.some((c) => c.node === node)) continue;
-            candidates.push({ node, label });
+            candidates.push({ node, label: normalizeUiText(visible) });
           }
         }
       }
@@ -960,21 +976,8 @@
       log('findMenuOption failed', err);
     }
 
-    const isForbidden = (label) => forbidden.some((bad) => label === bad || label.startsWith(bad));
-
-    for (const pass of ['exact', 'prefix', 'contains']) {
-      for (const candidate of candidates) {
-        if (isForbidden(candidate.label)) continue;
-        for (const want of wanted) {
-          if (pass === 'exact' && candidate.label === want) return { node: candidate.node, label: candidate.label };
-          if (pass === 'prefix' && want.length >= 5 && candidate.label.startsWith(want)) {
-            return { node: candidate.node, label: candidate.label };
-          }
-          if (pass === 'contains' && want.length >= 10 && candidate.label.includes(want)) {
-            return { node: candidate.node, label: candidate.label };
-          }
-        }
-      }
+    for (const candidate of candidates) {
+      if (isExactAllowedLabel(candidate.label, allowed, forbidden)) return candidate;
     }
     return null;
   }
@@ -1280,35 +1283,26 @@
   }
 
   function findConfirmButton(dialog) {
-    const wanted = DELETE_SELECTORS.confirmTexts.map(normalizeUiText).filter(Boolean);
-    const forbidden = DELETE_SELECTORS.forbiddenOptionTexts.map(normalizeUiText).filter(Boolean);
+    const allowed = normalizeAllowlist(DELETE_SELECTORS.confirmTexts);
+    const forbidden = normalizeAllowlist(DELETE_SELECTORS.forbiddenOptionTexts);
     const candidates = [];
 
     try {
       for (const selector of DELETE_SELECTORS.dialogButtons) {
         for (const node of dialog.querySelectorAll(selector)) {
           if (node.getClientRects().length === 0) continue;
-          const label = normalizeUiText(node.innerText || node.textContent);
-          if (!label || label.length > 40) continue;
+          const visible = node.innerText || node.textContent;
+          if (!normalizeUiText(visible)) continue;
           if (candidates.some((c) => c.node === node)) continue;
-          candidates.push({ node, label });
+          candidates.push({ node, label: normalizeUiText(visible) });
         }
       }
     } catch (err) {
       log('findConfirmButton failed', err);
     }
 
-    const isForbidden = (label) => forbidden.some((bad) => label === bad);
-    for (const pass of ['exact', 'prefix']) {
-      for (const candidate of candidates) {
-        if (isForbidden(candidate.label)) continue;
-        for (const want of wanted) {
-          if (pass === 'exact' && candidate.label === want) return { node: candidate.node, label: candidate.label };
-          if (pass === 'prefix' && want.length >= 4 && candidate.label.startsWith(want)) {
-            return { node: candidate.node, label: candidate.label };
-          }
-        }
-      }
+    for (const candidate of candidates) {
+      if (isExactAllowedLabel(candidate.label, allowed, forbidden)) return candidate;
     }
     return null;
   }
@@ -1733,6 +1727,8 @@
 
   // Exposed for manual debugging in the DevTools console.
   window.__nqiyaParseDate = parseDate;
+  window.__nqiyaNormalizeUiText = normalizeUiText;
+  window.__nqiyaIsExactAllowedLabel = isExactAllowedLabel;
 
   log('content script ready');
 })();
